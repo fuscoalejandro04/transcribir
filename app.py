@@ -2,21 +2,43 @@ import streamlit as st
 import re
 import io
 from docx import Document
+
+# Importaciones de la librería (compatibles con v1.x)
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    VideoUnavailable,
-    CouldNotRetrieveTranscript,
+try:
+    from youtube_transcript_api import (
+        TranscriptsDisabled,
+        NoTranscriptFound,
+        VideoUnavailable,
+        CouldNotRetrieveTranscript,
+    )
+except ImportError:
+    # Fallback para versiones que aún exponen los errores en _errors
+    from youtube_transcript_api._errors import (
+        TranscriptsDisabled,
+        NoTranscriptFound,
+        VideoUnavailable,
+        CouldNotRetrieveTranscript,
+    )
+
+# ---------------------------------------------------------------
+# Configuración de la página
+# ---------------------------------------------------------------
+st.set_page_config(
+    page_title="YouTube a Word",
+    page_icon="📄",
+    layout="centered",
 )
 
-# Configuración de la página (opcional, pero mejora la apariencia)
-st.set_page_config(page_title="YouTube a Word", page_icon="📄", layout="centered")
-
 st.title("📄 Transcripción de YouTube a Word")
-st.caption("Pega la URL de un video de YouTube para descargar su transcripción en formato .docx")
+st.caption(
+    "Pega la URL de un video de YouTube para descargar su transcripción en formato .docx"
+)
 
-def extraer_id_video(url: str) -> str | None:
+# ---------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------
+def extraer_id_video(url: str):
     """Extrae el ID de 11 caracteres de una URL de YouTube."""
     patrones = [
         r'(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
@@ -30,100 +52,111 @@ def extraer_id_video(url: str) -> str | None:
             return match.group(1)
     return None
 
+
 def generar_docx(texto: str, url_video: str) -> bytes:
     """Crea un documento de Word en memoria y devuelve sus bytes."""
     doc = Document()
     doc.add_heading("Transcripción del Video de YouTube", 0)
     doc.add_paragraph(f"URL original: {url_video}")
-    doc.add_paragraph("")  # Línea en blanco de separación
-    
+    doc.add_paragraph("")  # Línea en blanco
+
     # Dividir en párrafos para mejor legibilidad
-    parrafos = re.split(r'(?<=[.!?]) +', texto)
+    parrafos = re.split(r'(?<=[.!?])\s+', texto)
     for parrafo in parrafos:
         if parrafo.strip():
             doc.add_paragraph(parrafo.strip())
-    
-    # Guardar en un buffer de memoria
+
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
 
-def obtener_transcripcion(video_id: str) -> str | None:
-    """Intenta obtener la transcripción, priorizando español e inglés."""
+
+def obtener_transcripcion(video_id: str):
+    """Obtiene la transcripción usando la API v1.x de youtube-transcript-api."""
     try:
-        lista_transcripciones = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Estrategia de selección de idioma
+        # 1) Instanciar la API (nueva forma desde v1.0)
+        ytt_api = YouTubeTranscriptApi()
+
+        # 2) Listar transcripciones disponibles
+        lista = ytt_api.list(video_id)
+
+        # 3) Estrategia de selección: español > inglés > cualquiera
         transcript = None
-        for idioma in ['es', 'en']:
+        for idioma in ("es", "en"):
             try:
-                # Intenta manual primero, luego generada
                 try:
-                    transcript = lista_transcripciones.find_manually_created_transcript([idioma])
+                    transcript = lista.find_manually_created_transcript([idioma])
                 except NoTranscriptFound:
-                    transcript = lista_transcripciones.find_generated_transcript([idioma])
-                break  # Si encuentra una, sale del bucle
+                    transcript = lista.find_generated_transcript([idioma])
+                break  # encontrada, salir del bucle
             except NoTranscriptFound:
-                continue  # Prueba el siguiente idioma
-        
+                continue
+
         if transcript is None:
-            # Si no hay es/en, toma la primera disponible
-            transcript = list(lista_transcripciones)[0]
-        
+            transcript = list(lista)[0]
+
+        # 4) Obtener los fragmentos
         datos = transcript.fetch()
-        texto = " ".join([item['text'] for item in datos])
+
+        # 5) En v1.x los snippets son objetos con atributo .text
+        texto = " ".join(snippet.text for snippet in datos)
         return texto
-        
+
     except TranscriptsDisabled:
         st.error("❌ El video tiene los subtítulos desactivados o no dispone de ellos.")
     except NoTranscriptFound:
         st.error("❌ No se encontró ninguna transcripción para este video.")
     except VideoUnavailable:
-        st.error("❌ El video no está disponible (puede ser privado o haber sido eliminado).")
+        st.error("❌ El video no está disponible (privado o eliminado).")
     except CouldNotRetrieveTranscript as e:
-        st.error(f"❌ No se pudo recuperar la transcripción. Error: {e}")
+        st.error(f"❌ No se pudo recuperar la transcripción. Detalle: {e}")
     except Exception as e:
         st.error(f"❌ Ocurrió un error inesperado: {e}")
-    
+
     return None
 
-# --- Interfaz de Usuario ---
+
+# ---------------------------------------------------------------
+# Interfaz de usuario
+# ---------------------------------------------------------------
 with st.form("url_form"):
     url_input = st.text_input(
         "🔗 URL del video de YouTube",
         placeholder="https://www.youtube.com/watch?v=...",
-        help="También funciona con enlaces cortos (youtu.be) o Shorts."
+        help="También funciona con enlaces cortos (youtu.be) o Shorts.",
     )
     submitted = st.form_submit_button("Obtener transcripción")
 
-if submitted and url_input:
-    video_id = extraer_id_video(url_input)
-    
-    if not video_id:
-        st.warning("⚠️ No se pudo identificar un ID de video válido en la URL. Verifícala.")
+if submitted:
+    if not url_input.strip():
+        st.warning("⚠️ Por favor, ingresa una URL.")
     else:
-        with st.spinner("Buscando y procesando la transcripción..."):
-            texto_transcripcion = obtener_transcripcion(video_id)
-        
-        if texto_transcripcion:
-            st.success("✅ ¡Transcripción obtenida con éxito!")
-            
-            # Generar el docx
-            docx_bytes = generar_docx(texto_transcripcion, url_input)
-            
-            # Botón de descarga (el MIME type correcto para docx)
-            st.download_button(
-                label="📥 Descargar archivo Word (.docx)",
-                data=docx_bytes,
-                file_name=f"transcripcion_{video_id}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
+        video_id = extraer_id_video(url_input)
+        if not video_id:
+            st.warning(
+                "⚠️ No se pudo identificar un ID de video válido en la URL. Verifícala."
             )
-            
-            # Opcional: mostrar una vista previa
-            with st.expander("👀 Vista previa del texto"):
-                st.write(texto_transcripcion[:1000] + "..." if len(texto_transcripcion) > 1000 else texto_transcripcion)
+        else:
+            with st.spinner("Buscando y procesando la transcripción..."):
+                texto = obtener_transcripcion(video_id)
 
-elif submitted and not url_input:
-    st.warning("⚠️ Por favor, ingresa una URL.")
+            if texto:
+                st.success("✅ ¡Transcripción obtenida con éxito!")
+
+                docx_bytes = generar_docx(texto, url_input)
+
+                st.download_button(
+                    label="📥 Descargar archivo Word (.docx)",
+                    data=docx_bytes,
+                    file_name=f"transcripcion_{video_id}.docx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document"
+                    ),
+                    type="primary",
+                )
+
+                with st.expander("👀 Vista previa del texto"):
+                    preview = texto[:1000] + "..." if len(texto) > 1000 else texto
+                    st.write(preview)
